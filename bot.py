@@ -43,7 +43,6 @@ class Config:
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
         
         # Robust handling for GEMINI_MODEL
-        # For the new SDK, 'gemini-1.5-flash' is the correct ID string.
         model_env = os.getenv("GEMINI_MODEL")
         self.gemini_model = model_env if model_env and model_env.strip() else "gemini-1.5-flash"
 
@@ -177,9 +176,8 @@ def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
 
 class GeminiClient:
     def __init__(self, api_key: str, model_name: str):
-        # We explicitly set the API version to v1 to ensure model availability.
-        # The new SDK defaults to v1beta, which sometimes lacks certain models.
-        self.client = genai.Client(api_key=api_key, http_options={'api_version': 'v1'})
+        # Reset to v1beta for widest model compatibility (including previews)
+        self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
 
     def generate_study_guide(self, text: str) -> str:
@@ -188,12 +186,14 @@ class GeminiClient:
             
         try:
             logger.info(f"Requesting study guide from Gemini ({self.model_name})...")
+            
+            # Construct content with system instruction as a high-priority prompt
+            # to avoid 'systemInstruction' field errors in older model versions
+            full_prompt = f"{GEMINI_SYSTEM_INSTRUCTION}\n\nNotes to process:\n\n{text}"
+            
             response = self.client.models.generate_content(
                 model=self.model_name,
-                contents=f"Notes:\n\n{text}",
-                config=types.GenerateContentConfig(
-                    system_instruction=GEMINI_SYSTEM_INSTRUCTION
-                )
+                contents=full_prompt
             )
             return response.text
         except Exception as e:
