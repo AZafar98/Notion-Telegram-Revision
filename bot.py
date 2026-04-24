@@ -6,6 +6,7 @@ import re
 from typing import Dict, Any, List, Optional
 from google import genai
 from google.genai import types
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # --- Configuration Constants ---
 NOTION_API_VERSION = "2025-09-03"
@@ -176,10 +177,15 @@ def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
 
 class GeminiClient:
     def __init__(self, api_key: str, model_name: str):
-        # Reset to v1beta for widest model compatibility (including previews)
         self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=10, max=60),
+        retry=retry_if_exception_type(Exception),
+        reraise=True
+    )
     def generate_study_guide(self, text: str) -> str:
         if not text.strip():
             return "No content provided to summarize."
@@ -187,8 +193,6 @@ class GeminiClient:
         try:
             logger.info(f"Requesting study guide from Gemini ({self.model_name})...")
             
-            # Construct content with system instruction as a high-priority prompt
-            # to avoid 'systemInstruction' field errors in older model versions
             full_prompt = f"{GEMINI_SYSTEM_INSTRUCTION}\n\nNotes to process:\n\n{text}"
             
             response = self.client.models.generate_content(
@@ -197,6 +201,9 @@ class GeminiClient:
             )
             return response.text
         except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                logger.warning(f"Rate limit hit for {self.model_name}. Retrying with exponential backoff...")
+                raise 
             logger.error(f"Gemini API error: {e}")
             raise DualDatabaseBotError("Gemini generation failed") from e
 
