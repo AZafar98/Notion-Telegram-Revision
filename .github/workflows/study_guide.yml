@@ -1,0 +1,33 @@
+name: Automated Notion Study Guide Generator
+
+on:
+  schedule:
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+
+jobs:
+  generate-study-guides:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Run Study Guide Generator
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          SOURCE_DATABASE_ID: ${{ secrets.SOURCE_DATABASE_ID }}
+          TARGET_DATABASE_ID: ${{ secrets.TARGET_DATABASE_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+        run: uv run bot.py
