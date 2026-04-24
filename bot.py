@@ -11,6 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 # --- Configuration Constants ---
 NOTION_API_VERSION = "2025-09-03"
 NOTION_BASE_URL = "https://api.notion.com/v1"
+TELEGRAM_BASE_URL = "https://api.telegram.org"
 
 # Notion Property Names
 PROP_SOURCE_PROCESSED = "Processed by AI"
@@ -32,8 +33,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class DualDatabaseBotError(Exception):
-    """Custom exception for the Dual Database Bot."""
+class StudyGuideBotError(Exception):
+    """Custom exception for the Study Guide Bot."""
     pass
 
 class Config:
@@ -42,8 +43,9 @@ class Config:
         self.source_id = os.getenv("SOURCE_DATABASE_ID") 
         self.target_id = os.getenv("TARGET_DATABASE_ID")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
+        self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
         
-        # Robust handling for GEMINI_MODEL
         model_env = os.getenv("GEMINI_MODEL")
         self.gemini_model = model_env if model_env and model_env.strip() else "gemini-1.5-flash"
 
@@ -54,8 +56,12 @@ class Config:
         if not self.target_id: missing.append("TARGET_DATABASE_ID")
         if not self.gemini_api_key: missing.append("GEMINI_API_KEY")
         
+        # Telegram is optional, but we'll log if it's missing
+        if not self.telegram_bot_token or not self.telegram_chat_id:
+            logger.warning("Telegram configuration missing. Notifications will be skipped.")
+        
         if missing:
-            raise DualDatabaseBotError(f"Missing required environment variables: {', '.join(missing)}")
+            raise StudyGuideBotError(f"Missing required environment variables: {', '.join(missing)}")
 
 class NotionClient:
     def __init__(self, token: str):
@@ -79,9 +85,7 @@ class NotionClient:
             return response.json().get("results", [])
         except Exception as e:
             logger.error(f"Failed to query source data source: {e}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise DualDatabaseBotError("Source Data Source query failed") from e
+            raise StudyGuideBotError("Source Data Source query failed") from e
 
     def get_page_text_content(self, page_id: str) -> str:
         url = f"{NOTION_BASE_URL}/blocks/{page_id}/children"
@@ -117,7 +121,7 @@ class NotionClient:
             return "Untitled"
         return "".join(t.get("plain_text", "") for t in title_list)
 
-    def create_target_page(self, data_source_id: str, title: str, blocks: List[Dict[str, Any]]):
+    def create_target_page(self, data_source_id: str, title: str, blocks: List[Dict[str, Any]]) -> Optional[str]:
         url = f"{NOTION_BASE_URL}/pages"
         payload = {
             "parent": {"data_source_id": data_source_id},
@@ -131,12 +135,12 @@ class NotionClient:
         try:
             response = requests.post(url, headers=self.headers, json=payload, timeout=20)
             response.raise_for_status()
+            data = response.json()
             logger.info(f"Successfully created target page: {title}")
+            return data.get("url")
         except Exception as e:
             logger.error(f"Failed to create target page: {e}")
-            if hasattr(e, 'response') and e.response:
-                logger.error(f"Response: {e.response.text}")
-            raise DualDatabaseBotError("Target page creation failed") from e
+            return None
 
     def mark_as_processed(self, page_id: str):
         url = f"{NOTION_BASE_URL}/pages/{page_id}"
@@ -148,16 +152,41 @@ class NotionClient:
         except Exception as e:
             logger.error(f"Failed to mark source page as processed: {e}")
 
+class TelegramClient:
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.api_url = f"{TELEGRAM_BASE_URL}/bot{self.bot_token}/sendMessage"
+
+    def send_notification(self, title: str, notion_url: str):
+        if not self.bot_token or not self.chat_id:
+            return
+            
+        text = (
+            f"🎯 <b>New Study Guide Generated!</b>\n\n"
+            f"<b>Title:</b> {title}\n\n"
+            f"🔗 <a href='{notion_url}'>View in Notion</a>"
+        )
+        
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        
+        try:
+            response = requests.post(self.api_url, json=payload, timeout=10)
+            response.raise_for_status()
+            logger.info("Telegram notification sent.")
+        except Exception as e:
+            logger.error(f"Failed to send Telegram notification: {e}")
+
 def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
-    """Converts a basic Markdown string into Notion block children."""
     blocks = []
     lines = md_text.split("\n")
-    
     for line in lines:
         line = line.strip()
-        if not line:
-            continue
-            
+        if not line: continue
         if line.startswith("### "):
             blocks.append({"object": "block", "type": "heading_3", "heading_3": {"rich_text": [{"text": {"content": line[4:]}}]}})
         elif line.startswith("## "):
@@ -172,7 +201,6 @@ def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
         else:
             content = line.replace("**", "").replace("__", "")
             blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": content}}]}})
-            
     return blocks
 
 class GeminiClient:
@@ -187,25 +215,18 @@ class GeminiClient:
         reraise=True
     )
     def generate_study_guide(self, text: str) -> str:
-        if not text.strip():
-            return "No content provided to summarize."
-            
+        if not text.strip(): return "No content provided."
         try:
             logger.info(f"Requesting study guide from Gemini ({self.model_name})...")
-            
             full_prompt = f"{GEMINI_SYSTEM_INSTRUCTION}\n\nNotes to process:\n\n{text}"
-            
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=full_prompt
-            )
+            response = self.client.models.generate_content(model=self.model_name, contents=full_prompt)
             return response.text
         except Exception as e:
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                logger.warning(f"Rate limit hit for {self.model_name}. Retrying with exponential backoff...")
+                logger.warning(f"Rate limit hit. Retrying...")
                 raise 
             logger.error(f"Gemini API error: {e}")
-            raise DualDatabaseBotError("Gemini generation failed") from e
+            raise StudyGuideBotError("Gemini generation failed") from e
 
 def main():
     try:
@@ -214,10 +235,11 @@ def main():
         
         notion = NotionClient(config.notion_token)
         gemini = GeminiClient(config.gemini_api_key, config.gemini_model)
+        telegram = TelegramClient(config.telegram_bot_token, config.telegram_chat_id)
         
         pages = notion.fetch_unprocessed_pages(config.source_id)
         if not pages:
-            logger.info("No unprocessed notes found in Source Data Source.")
+            logger.info("No unprocessed notes found.")
             return
 
         for page in pages:
@@ -230,16 +252,17 @@ def main():
             blocks = markdown_to_notion_blocks(md_guide)
             
             target_title = f"Study Guide: {source_title}"
-            notion.create_target_page(config.target_id, target_title, blocks)
+            notion_url = notion.create_target_page(config.target_id, target_title, blocks)
+            
+            if notion_url:
+                telegram.send_notification(target_title, notion_url)
+            
             notion.mark_as_processed(source_id)
             
         logger.info("Batch processing complete.")
             
-    except DualDatabaseBotError as e:
-        logger.error(f"Automation Halted: {e}")
-        sys.exit(1)
     except Exception as e:
-        logger.exception(f"Unhandled Runtime Error: {e}")
+        logger.exception(f"Unhandled Error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
