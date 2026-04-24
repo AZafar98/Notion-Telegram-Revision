@@ -239,27 +239,31 @@ def main():
         
         pages = notion.fetch_unprocessed_pages(config.source_id)
         if not pages:
-            logger.info("No unprocessed notes found.")
+            logger.info("No unprocessed notes found in Source Data Source.")
             return
 
-        for page in pages:
-            source_id = page.get("id")
-            source_title = notion.extract_title(page)
-            logger.info(f"Processing: {source_title}")
-            
-            content = notion.get_page_text_content(source_id)
-            md_guide = gemini.generate_study_guide(content)
-            blocks = markdown_to_notion_blocks(md_guide)
-            
-            target_title = f"Study Guide: {source_title}"
-            notion_url = notion.create_target_page(config.target_id, target_title, blocks)
-            
-            if notion_url:
-                telegram.send_notification(target_title, notion_url)
-            
-            notion.mark_as_processed(source_id)
-            
-        logger.info("Batch processing complete.")
+        # Sort by created_time (oldest first) and take only the first one
+        # to ensure we process one page per day as requested.
+        pages.sort(key=lambda x: x.get("created_time", ""))
+        page_to_process = pages[0]
+
+        source_id = page_to_process.get("id")
+        source_title = notion.extract_title(page_to_process)
+        logger.info(f"Processing: {source_title}")
+
+        content = notion.get_page_text_content(source_id)
+        md_guide = gemini.generate_study_guide(content)
+        blocks = markdown_to_notion_blocks(md_guide)
+
+        target_title = f"Study Guide: {source_title}"
+        notion_url = notion.create_target_page(config.target_id, target_title, blocks)
+
+        if notion_url:
+            telegram.send_notification(target_title, notion_url)
+
+        notion.mark_as_processed(source_id)
+
+        logger.info("Daily study guide processing complete.")
             
     except Exception as e:
         logger.exception(f"Unhandled Error: {e}")
