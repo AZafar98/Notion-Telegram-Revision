@@ -1,6 +1,9 @@
 name: Automated Notion Study Guide Generator
 
 on:
+  push:
+    branches:
+      - master
   schedule:
     - cron: '0 13 * * *'
   workflow_dispatch:
