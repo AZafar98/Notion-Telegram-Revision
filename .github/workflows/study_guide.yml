@@ -32,5 +32,5 @@ jobs:
           SOURCE_DATABASE_ID: ${{ secrets.SOURCE_DATABASE_ID }}
           TARGET_DATABASE_ID: ${{ secrets.TARGET_DATABASE_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          GEMINI_MODEL: ${{ VARS.GEMINI_MODEL }}
         run: uv run bot.py
