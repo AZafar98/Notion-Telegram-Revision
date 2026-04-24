@@ -195,19 +195,34 @@ class TelegramClient:
         self.chat_id = chat_id
         self.base_url = f"{TELEGRAM_BASE_URL}/bot{self.bot_token}"
 
+    def _sanitize_html(self, text: str) -> str:
+        """Basic conversion of Markdown-style bold/italic to HTML for Telegram."""
+        # Escape HTML special characters
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        # Bold: **text** -> <b>text</b>
+        text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+        # Italic: *text* -> <i>text</i>
+        text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+        return text
+
     def send_message(self, text: str):
         if not self.bot_token or not self.chat_id:
             return
             
         url = f"{self.base_url}/sendMessage"
+        # Sanitize and convert to HTML
+        html_text = self._sanitize_html(text)
+        
         payload = {
             "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
+            "text": html_text,
+            "parse_mode": "HTML"
         }
         
         try:
             response = requests.post(url, json=payload, timeout=10)
+            if response.status_code != 200:
+                logger.error(f"Telegram Message Error: {response.text}")
             response.raise_for_status()
             logger.info("Telegram message sent.")
         except Exception as e:
@@ -218,18 +233,35 @@ class TelegramClient:
             return
             
         url = f"{self.base_url}/sendPoll"
+        
+        # Telegram Poll Limits:
+        # Question: 300 chars
+        # Options: 100 chars each (max 10 options)
+        # Explanation: 200 chars
+        
+        question = poll_data.get("question", "Quiz Question")[:300]
+        options = [str(opt)[:100] for opt in poll_data.get("options", [])[:10]]
+        explanation = poll_data.get("explanation", "")[:200]
+        correct_index = poll_data.get("correct_option_index", 0)
+        
+        # Ensure correct_index is within range
+        if not (0 <= correct_index < len(options)):
+            correct_index = 0
+
         payload = {
             "chat_id": self.chat_id,
-            "question": poll_data["question"],
-            "options": poll_data["options"],
+            "question": question,
+            "options": options,
             "is_anonymous": False,
             "type": "quiz",
-            "correct_option_id": poll_data["correct_option_index"],
-            "explanation": poll_data.get("explanation", "")
+            "correct_option_id": correct_index,
+            "explanation": explanation
         }
         
         try:
             response = requests.post(url, json=payload, timeout=10)
+            if response.status_code != 200:
+                logger.error(f"Telegram Poll Error: {response.text}")
             response.raise_for_status()
             logger.info("Telegram poll sent.")
         except Exception as e:
