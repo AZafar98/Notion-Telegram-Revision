@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional
 import google.generativeai as genai
 
 # --- Configuration Constants ---
-NOTION_API_VERSION = "2022-06-28"
+NOTION_API_VERSION = "2025-09-03"
 NOTION_BASE_URL = "https://api.notion.com/v1"
 
 # Notion Property Names
@@ -37,16 +37,18 @@ class DualDatabaseBotError(Exception):
 class Config:
     def __init__(self):
         self.notion_token = os.getenv("NOTION_TOKEN")
-        self.source_db_id = os.getenv("SOURCE_DATABASE_ID")
-        self.target_db_id = os.getenv("TARGET_DATABASE_ID")
+        # In 2025-09-03, we need the specific Data Source IDs, 
+        # but for simplicity in instructions, we'll keep the env name.
+        self.source_id = os.getenv("SOURCE_DATABASE_ID") 
+        self.target_id = os.getenv("TARGET_DATABASE_ID")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
         self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
     def validate(self):
         missing = []
         if not self.notion_token: missing.append("NOTION_TOKEN")
-        if not self.source_db_id: missing.append("SOURCE_DATABASE_ID")
-        if not self.target_db_id: missing.append("TARGET_DATABASE_ID")
+        if not self.source_id: missing.append("SOURCE_DATABASE_ID (Data Source ID)")
+        if not self.target_id: missing.append("TARGET_DATABASE_ID (Data Source ID)")
         if not self.gemini_api_key: missing.append("GEMINI_API_KEY")
         
         if missing:
@@ -60,8 +62,9 @@ class NotionClient:
             "Content-Type": "application/json"
         }
 
-    def fetch_unprocessed_pages(self, database_id: str) -> List[Dict[str, Any]]:
-        url = f"{NOTION_BASE_URL}/databases/{database_id}/query"
+    def fetch_unprocessed_pages(self, data_source_id: str) -> List[Dict[str, Any]]:
+        # 2025-09-03 uses /v1/data_sources/{id}/query instead of /v1/databases/{id}/query
+        url = f"{NOTION_BASE_URL}/data_sources/{data_source_id}/query"
         payload = {
             "filter": {
                 "property": PROP_SOURCE_PROCESSED,
@@ -73,8 +76,10 @@ class NotionClient:
             response.raise_for_status()
             return response.json().get("results", [])
         except Exception as e:
-            logger.error(f"Failed to query source database: {e}")
-            raise DualDatabaseBotError("Source DB query failed") from e
+            logger.error(f"Failed to query source data source: {e}")
+            if hasattr(e, 'response') and e.response:
+                logger.error(f"Response: {e.response.text}")
+            raise DualDatabaseBotError("Source Data Source query failed") from e
 
     def get_page_text_content(self, page_id: str) -> str:
         url = f"{NOTION_BASE_URL}/blocks/{page_id}/children"
@@ -110,16 +115,17 @@ class NotionClient:
             return "Untitled"
         return "".join(t.get("plain_text", "") for t in title_list)
 
-    def create_target_page(self, database_id: str, title: str, blocks: List[Dict[str, Any]]):
+    def create_target_page(self, data_source_id: str, title: str, blocks: List[Dict[str, Any]]):
         url = f"{NOTION_BASE_URL}/pages"
         payload = {
-            "parent": {"database_id": database_id},
+            # In 2025-09-03, parent must specify data_source_id instead of database_id
+            "parent": {"data_source_id": data_source_id},
             "properties": {
                 "Name": {
                     "title": [{"text": {"content": title}}]
                 }
             },
-            "children": blocks[:100]  # Notion API limit is 100 blocks per request
+            "children": blocks[:100]
         }
         try:
             response = requests.post(url, headers=self.headers, json=payload, timeout=20)
@@ -151,22 +157,18 @@ def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
         if not line:
             continue
             
-        # Headings
         if line.startswith("### "):
             blocks.append({"object": "block", "type": "heading_3", "heading_3": {"rich_text": [{"text": {"content": line[4:]}}]}})
         elif line.startswith("## "):
             blocks.append({"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"text": {"content": line[3:]}}]}})
         elif line.startswith("# "):
             blocks.append({"object": "block", "type": "heading_1", "heading_1": {"rich_text": [{"text": {"content": line[2:]}}]}})
-        # Lists
         elif line.startswith("- ") or line.startswith("* "):
             blocks.append({"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [{"text": {"content": line[2:]}}]}})
         elif re.match(r"^\d+\.\s", line):
             content = re.sub(r"^\d+\.\s", "", line)
             blocks.append({"object": "block", "type": "numbered_list_item", "numbered_list_item": {"rich_text": [{"text": {"content": content}}]}})
-        # Default to Paragraph
         else:
-            # Handle basic bolding (simple regex)
             content = line.replace("**", "").replace("__", "")
             blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": content}}]}})
             
@@ -200,9 +202,10 @@ def main():
         notion = NotionClient(config.notion_token)
         gemini = GeminiClient(config.gemini_api_key, config.gemini_model)
         
-        pages = notion.fetch_unprocessed_pages(config.source_db_id)
+        # In 2025-09-03, we use the Data Source ID
+        pages = notion.fetch_unprocessed_pages(config.source_id)
         if not pages:
-            logger.info("No unprocessed notes found in Source Database.")
+            logger.info("No unprocessed notes found in Source Data Source.")
             return
 
         for page in pages:
@@ -210,18 +213,12 @@ def main():
             source_title = notion.extract_title(page)
             logger.info(f"Processing: {source_title}")
             
-            # 1. Extract content from source
             content = notion.get_page_text_content(source_id)
-            
-            # 2. Generate Guide via Gemini
             md_guide = gemini.generate_study_guide(content)
-            
-            # 3. Convert MD to Blocks and Create in Target DB
             blocks = markdown_to_notion_blocks(md_guide)
-            target_title = f"Study Guide: {source_title}"
-            notion.create_target_page(config.target_db_id, target_title, blocks)
             
-            # 4. Mark Source as Processed
+            target_title = f"Study Guide: {source_title}"
+            notion.create_target_page(config.target_id, target_title, blocks)
             notion.mark_as_processed(source_id)
             
         logger.info("Batch processing complete.")
