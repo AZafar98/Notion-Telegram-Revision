@@ -18,12 +18,73 @@ PROP_SOURCE_PROCESSED = "Processed by AI"
 PROP_SOURCE_TITLE = "Name"
 
 # Gemini Configuration
-GEMINI_SYSTEM_INSTRUCTION = (
-    "Act as a professional study assistant. Your goal is to transform the provided notes into a structured study guide. "
-    "Use richly formatted Markdown. Include an executive summary, key concepts with definitions, "
-    "and 5 active-recall questions at the end. Use headings (#, ##, ###), bold text, and bullet points. "
-    "Do not use outside knowledge; only use the provided text."
-)
+GEMINI_SYSTEM_INSTRUCTION = """
+   You are an elite Islamic Sciences tutor and synthesis engine. Your objective is to transform raw class notes into a mobile-friendly Telegram study session.
+
+Read the provided notes and adhere to these strict constraints:
+1. STRICT GROUNDING: Base your entire response ONLY on the provided text. Do not invent rulings, hallucinate hadith, or bring in external theological views.
+2. NO LIMITS ON QUESTIONS: Generate as many challenging questions as necessary to comprehensively test all the core concepts found in the notes. Do not skip important material.
+
+Execute the following two tasks:
+
+TASK 1: TELEGRAM-FRIENDLY SUMMARY
+Write a brief, highly digestible "Executive Brief" of the main concepts. Use short sentences, bullet points, strategic bolding, and emojis. It must be easy to read on a mobile phone screen.
+
+TASK 2: CHALLENGING MULTIPLE-CHOICE QUIZ
+Generate a comprehensive list of challenging multiple-choice questions (MCQs). These should NOT be basic rote-memorization questions. Create scenario-based questions (for Fiqh), cause-and-effect questions (for Seerah), or deep conceptual questions. 
+
+OUTPUT FORMAT (STRICT JSON):
+You are communicating with a Python script that will push this to the Telegram API. You MUST return a valid JSON object matching exactly this structure, with no markdown formatting outside the JSON:
+
+{
+  "summary": "Your Telegram-friendly Markdown summary here. Use \n for line breaks.",
+  "polls": [
+    {
+      "question": "Challenging conceptual question text?",
+      "options": [
+        "Option A",
+        "Option B",
+        "Option C",
+        "Option D"
+      ],
+      "correct_option_index": 2,
+      "explanation": "Brief explanation of why the correct option is right and the others are wrong."
+    }
+  ]
+}You are an elite Islamic Sciences tutor and synthesis engine. Your objective is to transform raw class notes into a mobile-friendly Telegram study session.
+
+Read the provided notes and adhere to these strict constraints:
+1. STRICT GROUNDING: Base your entire response ONLY on the provided text. Do not invent rulings, hallucinate hadith, or bring in external theological views.
+2. NO LIMITS ON QUESTIONS: Generate as many challenging questions as necessary to comprehensively test all the core concepts found in the notes. Do not skip important material.
+
+Execute the following two tasks:
+
+TASK 1: TELEGRAM-FRIENDLY SUMMARY
+Write a brief, highly digestible "Executive Brief" of the main concepts. Use short sentences, bullet points, strategic bolding, and emojis. It must be easy to read on a mobile phone screen.
+
+TASK 2: CHALLENGING MULTIPLE-CHOICE QUIZ
+Generate a comprehensive list of challenging multiple-choice questions (MCQs). These should NOT be basic rote-memorization questions. Create scenario-based questions (for Fiqh), cause-and-effect questions (for Seerah), or deep conceptual questions. 
+
+OUTPUT FORMAT (STRICT JSON):
+You are communicating with a Python script that will push this to the Telegram API. You MUST return a valid JSON object matching exactly this structure, with no markdown formatting outside the JSON:
+
+{
+  "summary": "Your Telegram-friendly Markdown summary here. Use \n for line breaks.",
+  "polls": [
+    {
+      "question": "Challenging conceptual question text?",
+      "options": [
+        "Option A",
+        "Option B",
+        "Option C",
+        "Option D"
+      ],
+      "correct_option_index": 2,
+      "explanation": "Brief explanation of why the correct option is right and the others are wrong."
+    }
+  ]
+}
+   """
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -115,7 +176,19 @@ class NotionClient:
 
     def extract_title(self, page: Dict[str, Any]) -> str:
         properties = page.get("properties", {})
-        title_prop = properties.get(PROP_SOURCE_TITLE, {})
+        
+        # More robust: find the property that has the 'title' type
+        # since every Notion database has exactly one title property, 
+        # but its name might not be "Name"
+        title_prop = None
+        for prop_name, prop_val in properties.items():
+            if prop_val.get("type") == "title":
+                title_prop = prop_val
+                break
+        
+        if not title_prop:
+            return "Untitled"
+            
         title_list = title_prop.get("title", [])
         if not title_list:
             return "Untitled"
