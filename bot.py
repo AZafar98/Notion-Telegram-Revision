@@ -42,7 +42,8 @@ class Config:
         self.target_id = os.getenv("TARGET_DATABASE_ID")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
         
-        # Robust handling for GEMINI_MODEL: use default if missing or empty string
+        # Robust handling for GEMINI_MODEL
+        # For the new SDK, 'gemini-1.5-flash' is the correct ID string.
         model_env = os.getenv("GEMINI_MODEL")
         self.gemini_model = model_env if model_env and model_env.strip() else "gemini-1.5-flash"
 
@@ -176,8 +177,9 @@ def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
 
 class GeminiClient:
     def __init__(self, api_key: str, model_name: str):
-        # Using the modern google-genai SDK
-        self.client = genai.Client(api_key=api_key)
+        # We explicitly set the API version to v1 to ensure model availability.
+        # The new SDK defaults to v1beta, which sometimes lacks certain models.
+        self.client = genai.Client(api_key=api_key, http_options={'api_version': 'v1'})
         self.model_name = model_name
 
     def generate_study_guide(self, text: str) -> str:
