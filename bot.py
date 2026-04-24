@@ -4,7 +4,8 @@ import logging
 import requests
 import re
 from typing import Dict, Any, List, Optional
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # --- Configuration Constants ---
 NOTION_API_VERSION = "2025-09-03"
@@ -15,27 +16,12 @@ PROP_SOURCE_PROCESSED = "Processed by AI"
 PROP_SOURCE_TITLE = "Name"
 
 # Gemini Configuration
-GEMINI_SYSTEM_INSTRUCTION = """
-You are an elite Islamic Sciences tutor and synthesis engine. Your objective is to transform raw class notes (covering subjects like Fiqh, Aqeedah, Seerah, and Tazkiyah/Spirituality) into a comprehensive, highly accurate study guide designed for deep comprehension.
-
-Read the provided notes and adhere to these strict constraints:
-1. STRICT GROUNDING: Base your entire response ONLY on the provided text. Do not invent rulings, hallucinate hadith, or bring in external theological views not present in the notes.
-2. RESPECT FOR THE SCIENCES: Treat definitions, Arabic terminology, and chronological events with absolute precision.
-3. FORMATTING: Use rich Markdown formatting. Use emojis strategically (e.g., 📖 for Quran/Hadith, ⚖️ for Fiqh/Rulings, 🤎 for matters of the heart).
-
-Task 1: Comprehensive Synthesis
-Write a detailed summary using clear logical hierarchies:
-- "## 🧠 Core Themes & Objectives" (The big picture of the lesson)
-- "## ⚙️ Key Mechanisms & Rulings" (Detailed breakdowns, conditions, or step-by-step concepts)
-- "## 📖 Vital Vocabulary & Maxims" (Definitions of Arabic terms or foundational principles)
-
-Task 2: Synthesis-Driven Active Recall
-- "## ❓ Active Recall Quiz"
-Generate 4 to 6 conceptual questions. Do not ask basic rote-memorization questions. Instead, ask scenario-based questions (for Fiqh), cause-and-effect questions (for Seerah), or introspective application questions (for Tazkiyah). 
-Format each question as a bullet point. Directly below each question, provide the detailed answer wrapped in a spoiler tag or nested cleanly so the student can test themselves.
-
-Return ONLY the raw Markdown text. Do not wrap it in ```markdown code blocks.
-"""
+GEMINI_SYSTEM_INSTRUCTION = (
+    "Act as a professional study assistant. Your goal is to transform the provided notes into a structured study guide. "
+    "Use richly formatted Markdown. Include an executive summary, key concepts with definitions, "
+    "and 5 active-recall questions at the end. Use headings (#, ##, ###), bold text, and bullet points. "
+    "Do not use outside knowledge; only use the provided text."
+)
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -52,18 +38,19 @@ class DualDatabaseBotError(Exception):
 class Config:
     def __init__(self):
         self.notion_token = os.getenv("NOTION_TOKEN")
-        # In 2025-09-03, we need the specific Data Source IDs, 
-        # but for simplicity in instructions, we'll keep the env name.
         self.source_id = os.getenv("SOURCE_DATABASE_ID") 
         self.target_id = os.getenv("TARGET_DATABASE_ID")
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
-        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        
+        # Robust handling for GEMINI_MODEL: use default if missing or empty string
+        model_env = os.getenv("GEMINI_MODEL")
+        self.gemini_model = model_env if model_env and model_env.strip() else "gemini-1.5-flash"
 
     def validate(self):
         missing = []
         if not self.notion_token: missing.append("NOTION_TOKEN")
-        if not self.source_id: missing.append("SOURCE_DATABASE_ID (Data Source ID)")
-        if not self.target_id: missing.append("TARGET_DATABASE_ID (Data Source ID)")
+        if not self.source_id: missing.append("SOURCE_DATABASE_ID")
+        if not self.target_id: missing.append("TARGET_DATABASE_ID")
         if not self.gemini_api_key: missing.append("GEMINI_API_KEY")
         
         if missing:
@@ -78,7 +65,6 @@ class NotionClient:
         }
 
     def fetch_unprocessed_pages(self, data_source_id: str) -> List[Dict[str, Any]]:
-        # 2025-09-03 uses /v1/data_sources/{id}/query instead of /v1/databases/{id}/query
         url = f"{NOTION_BASE_URL}/data_sources/{data_source_id}/query"
         payload = {
             "filter": {
@@ -133,7 +119,6 @@ class NotionClient:
     def create_target_page(self, data_source_id: str, title: str, blocks: List[Dict[str, Any]]):
         url = f"{NOTION_BASE_URL}/pages"
         payload = {
-            # In 2025-09-03, parent must specify data_source_id instead of database_id
             "parent": {"data_source_id": data_source_id},
             "properties": {
                 "Name": {
@@ -191,19 +176,23 @@ def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
 
 class GeminiClient:
     def __init__(self, api_key: str, model_name: str):
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=GEMINI_SYSTEM_INSTRUCTION
-        )
+        # Using the modern google-genai SDK
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = model_name
 
     def generate_study_guide(self, text: str) -> str:
         if not text.strip():
             return "No content provided to summarize."
             
         try:
-            logger.info("Requesting study guide from Gemini...")
-            response = self.model.generate_content(f"Notes:\n\n{text}")
+            logger.info(f"Requesting study guide from Gemini ({self.model_name})...")
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=f"Notes:\n\n{text}",
+                config=types.GenerateContentConfig(
+                    system_instruction=GEMINI_SYSTEM_INSTRUCTION
+                )
+            )
             return response.text
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
@@ -217,7 +206,6 @@ def main():
         notion = NotionClient(config.notion_token)
         gemini = GeminiClient(config.gemini_api_key, config.gemini_model)
         
-        # In 2025-09-03, we use the Data Source ID
         pages = notion.fetch_unprocessed_pages(config.source_id)
         if not pages:
             logger.info("No unprocessed notes found in Source Data Source.")
