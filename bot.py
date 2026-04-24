@@ -69,15 +69,21 @@ class StudyGuideBotError(Exception):
 
 class Config:
     def __init__(self):
-        self.notion_token = os.getenv("NOTION_TOKEN")
-        self.source_id = os.getenv("SOURCE_DATABASE_ID") 
-        self.target_id = os.getenv("TARGET_DATABASE_ID")
-        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
-        self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        self.notion_token = os.getenv("NOTION_TOKEN", "").strip()
+        self.source_id = os.getenv("SOURCE_DATABASE_ID", "").strip() 
+        self.target_id = os.getenv("TARGET_DATABASE_ID", "").strip()
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         
         model_env = os.getenv("GEMINI_MODEL")
         self.gemini_model = model_env if model_env and model_env.strip() else "gemini-1.5-flash"
+
+        # Safe Debugging Logs
+        if self.telegram_chat_id:
+            logger.info(f"Telegram Chat ID detected: {self.telegram_chat_id[:4]}...{self.telegram_chat_id[-2:]} (Length: {len(self.telegram_chat_id)})")
+        if self.telegram_bot_token:
+            logger.info(f"Telegram Bot Token detected: {self.telegram_bot_token[:5]}... (Length: {len(self.telegram_bot_token)})")
 
     def validate(self):
         missing = []
