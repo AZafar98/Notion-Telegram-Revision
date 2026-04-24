@@ -3,6 +3,7 @@ import sys
 import logging
 import requests
 import re
+import json
 from typing import Dict, Any, List, Optional
 from google import genai
 from google.genai import types
@@ -15,43 +16,11 @@ TELEGRAM_BASE_URL = "https://api.telegram.org"
 
 # Notion Property Names
 PROP_SOURCE_PROCESSED = "Processed by AI"
-PROP_SOURCE_TITLE = "Name"
+PROP_SOURCE_TITLE = "Topic"
 
 # Gemini Configuration
 GEMINI_SYSTEM_INSTRUCTION = """
    You are an elite Islamic Sciences tutor and synthesis engine. Your objective is to transform raw class notes into a mobile-friendly Telegram study session.
-
-Read the provided notes and adhere to these strict constraints:
-1. STRICT GROUNDING: Base your entire response ONLY on the provided text. Do not invent rulings, hallucinate hadith, or bring in external theological views.
-2. NO LIMITS ON QUESTIONS: Generate as many challenging questions as necessary to comprehensively test all the core concepts found in the notes. Do not skip important material.
-
-Execute the following two tasks:
-
-TASK 1: TELEGRAM-FRIENDLY SUMMARY
-Write a brief, highly digestible "Executive Brief" of the main concepts. Use short sentences, bullet points, strategic bolding, and emojis. It must be easy to read on a mobile phone screen.
-
-TASK 2: CHALLENGING MULTIPLE-CHOICE QUIZ
-Generate a comprehensive list of challenging multiple-choice questions (MCQs). These should NOT be basic rote-memorization questions. Create scenario-based questions (for Fiqh), cause-and-effect questions (for Seerah), or deep conceptual questions. 
-
-OUTPUT FORMAT (STRICT JSON):
-You are communicating with a Python script that will push this to the Telegram API. You MUST return a valid JSON object matching exactly this structure, with no markdown formatting outside the JSON:
-
-{
-  "summary": "Your Telegram-friendly Markdown summary here. Use \n for line breaks.",
-  "polls": [
-    {
-      "question": "Challenging conceptual question text?",
-      "options": [
-        "Option A",
-        "Option B",
-        "Option C",
-        "Option D"
-      ],
-      "correct_option_index": 2,
-      "explanation": "Brief explanation of why the correct option is right and the others are wrong."
-    }
-  ]
-}You are an elite Islamic Sciences tutor and synthesis engine. Your objective is to transform raw class notes into a mobile-friendly Telegram study session.
 
 Read the provided notes and adhere to these strict constraints:
 1. STRICT GROUNDING: Base your entire response ONLY on the provided text. Do not invent rulings, hallucinate hadith, or bring in external theological views.
@@ -117,7 +86,6 @@ class Config:
         if not self.target_id: missing.append("TARGET_DATABASE_ID")
         if not self.gemini_api_key: missing.append("GEMINI_API_KEY")
         
-        # Telegram is optional, but we'll log if it's missing
         if not self.telegram_bot_token or not self.telegram_chat_id:
             logger.warning("Telegram configuration missing. Notifications will be skipped.")
         
@@ -176,10 +144,6 @@ class NotionClient:
 
     def extract_title(self, page: Dict[str, Any]) -> str:
         properties = page.get("properties", {})
-        
-        # More robust: find the property that has the 'title' type
-        # since every Notion database has exactly one title property, 
-        # but its name might not be "Name"
         title_prop = None
         for prop_name, prop_val in properties.items():
             if prop_val.get("type") == "title":
@@ -229,30 +193,47 @@ class TelegramClient:
     def __init__(self, bot_token: str, chat_id: str):
         self.bot_token = bot_token
         self.chat_id = chat_id
-        self.api_url = f"{TELEGRAM_BASE_URL}/bot{self.bot_token}/sendMessage"
+        self.base_url = f"{TELEGRAM_BASE_URL}/bot{self.bot_token}"
 
-    def send_notification(self, title: str, notion_url: str):
+    def send_message(self, text: str):
         if not self.bot_token or not self.chat_id:
             return
             
-        text = (
-            f"🎯 <b>New Study Guide Generated!</b>\n\n"
-            f"<b>Title:</b> {title}\n\n"
-            f"🔗 <a href='{notion_url}'>View in Notion</a>"
-        )
-        
+        url = f"{self.base_url}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
             "text": text,
-            "parse_mode": "HTML"
+            "parse_mode": "Markdown"
         }
         
         try:
-            response = requests.post(self.api_url, json=payload, timeout=10)
+            response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
-            logger.info("Telegram notification sent.")
+            logger.info("Telegram message sent.")
         except Exception as e:
-            logger.error(f"Failed to send Telegram notification: {e}")
+            logger.error(f"Failed to send Telegram message: {e}")
+
+    def send_poll(self, poll_data: Dict[str, Any]):
+        if not self.bot_token or not self.chat_id:
+            return
+            
+        url = f"{self.base_url}/sendPoll"
+        payload = {
+            "chat_id": self.chat_id,
+            "question": poll_data["question"],
+            "options": poll_data["options"],
+            "is_anonymous": False,
+            "type": "quiz",
+            "correct_option_id": poll_data["correct_option_index"],
+            "explanation": poll_data.get("explanation", "")
+        }
+        
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            logger.info("Telegram poll sent.")
+        except Exception as e:
+            logger.error(f"Failed to send Telegram poll: {e}")
 
 def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
     blocks = []
@@ -287,13 +268,20 @@ class GeminiClient:
         retry=retry_if_exception_type(Exception),
         reraise=True
     )
-    def generate_study_guide(self, text: str) -> str:
-        if not text.strip(): return "No content provided."
+    def generate_study_guide(self, text: str) -> Dict[str, Any]:
+        if not text.strip(): return {"summary": "No content provided.", "polls": []}
         try:
             logger.info(f"Requesting study guide from Gemini ({self.model_name})...")
             full_prompt = f"{GEMINI_SYSTEM_INSTRUCTION}\n\nNotes to process:\n\n{text}"
-            response = self.client.models.generate_content(model=self.model_name, contents=full_prompt)
-            return response.text
+            
+            response = self.client.models.generate_content(
+                model=self.model_name, 
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
+            )
+            return json.loads(response.text)
         except Exception as e:
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                 logger.warning(f"Rate limit hit. Retrying...")
@@ -312,11 +300,9 @@ def main():
         
         pages = notion.fetch_unprocessed_pages(config.source_id)
         if not pages:
-            logger.info("No unprocessed notes found in Source Data Source.")
+            logger.info("No unprocessed notes found.")
             return
 
-        # Sort by created_time (oldest first) and take only the first one
-        # to ensure we process one page per day as requested.
         pages.sort(key=lambda x: x.get("created_time", ""))
         page_to_process = pages[0]
 
@@ -325,18 +311,26 @@ def main():
         logger.info(f"Processing: {source_title}")
 
         content = notion.get_page_text_content(source_id)
-        md_guide = gemini.generate_study_guide(content)
-        blocks = markdown_to_notion_blocks(md_guide)
+        ai_data = gemini.generate_study_guide(content)
+        
+        summary = ai_data.get("summary", "")
+        polls = ai_data.get("polls", [])
 
+        # Write to Notion
+        blocks = markdown_to_notion_blocks(summary)
         target_title = f"Study Guide: {source_title}"
-        notion_url = notion.create_target_page(config.target_id, target_title, blocks)
+        notion.create_target_page(config.target_id, target_title, blocks)
 
-        if notion_url:
-            telegram.send_notification(target_title, notion_url)
+        # Push to Telegram
+        telegram.send_message(f"📚 *Topic: {source_title}*\n\n{summary}")
+        
+        for poll in polls:
+            telegram.send_poll(poll)
 
+        # Mark as done
         notion.mark_as_processed(source_id)
 
-        logger.info("Daily study guide processing complete.")
+        logger.info("Daily study guide and polls processing complete.")
             
     except Exception as e:
         logger.exception(f"Unhandled Error: {e}")
