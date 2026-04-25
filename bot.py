@@ -116,7 +116,7 @@ class NotionClient:
         reraise=True
     )
     def fetch_unprocessed_pages(self, data_source_id: str) -> List[Dict[str, Any]]:
-        url = f"{NOTION_BASE_URL}/databases/{data_source_id}/query"
+        url = f"{NOTION_BASE_URL}/data_sources/{data_source_id}/query"
         payload = {
             "filter": {
                 "property": PROP_SOURCE_PROCESSED,
@@ -128,7 +128,7 @@ class NotionClient:
             response.raise_for_status()
             return response.json().get("results", [])
         except Exception as e:
-            logger.error(f"Failed to query source database: {e}")
+            logger.error(f"Failed to query source data source: {e}")
             raise
 
     @retry(
@@ -185,10 +185,10 @@ class NotionClient:
         retry=retry_if_exception_type(requests.exceptions.RequestException),
         reraise=True
     )
-    def create_target_page(self, database_id: str, title: str, blocks: List[Dict[str, Any]]) -> Optional[str]:
+    def create_target_page(self, data_source_id: str, title: str, blocks: List[Dict[str, Any]]) -> Optional[str]:
         url = f"{NOTION_BASE_URL}/pages"
         payload = {
-            "parent": {"database_id": database_id},
+            "parent": {"data_source_id": data_source_id},
             "properties": {
                 "Name": {
                     "title": [{"text": {"content": title}}]
