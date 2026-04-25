@@ -5,6 +5,7 @@ import requests
 import re
 import json
 from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -17,6 +18,17 @@ TELEGRAM_BASE_URL = "https://api.telegram.org"
 # Notion Property Names
 PROP_SOURCE_PROCESSED = "Processed by AI"
 PROP_SOURCE_TITLE = "Topic"
+
+# --- Models ---
+class PollModel(BaseModel):
+    question: str = Field(..., description="Challenging conceptual question text", max_length=300)
+    options: List[str] = Field(..., description="List of 2-10 options", min_length=2, max_length=10)
+    correct_option_index: int = Field(..., description="0-based index of the correct option")
+    explanation: str = Field(..., description="Brief explanation of the correct answer", max_length=200)
+
+class StudyGuideModel(BaseModel):
+    summary: str = Field(..., description="Telegram-friendly Markdown summary")
+    polls: List[PollModel] = Field(..., description="List of multiple-choice questions")
 
 # Gemini Configuration
 GEMINI_SYSTEM_INSTRUCTION = """
@@ -34,32 +46,23 @@ Write a brief, highly digestible "Executive Brief" of the main concepts. Use sho
 TASK 2: CHALLENGING MULTIPLE-CHOICE QUIZ
 Generate a comprehensive list of challenging multiple-choice questions (MCQs). These should NOT be basic rote-memorization questions. Create scenario-based questions (for Fiqh), cause-and-effect questions (for Seerah), or deep conceptual questions. 
 
-OUTPUT FORMAT (STRICT JSON):
-You are communicating with a Python script that will push this to the Telegram API. You MUST return a valid JSON object matching exactly this structure, with no markdown formatting outside the JSON:
-
-{
-  "summary": "Your Telegram-friendly Markdown summary here. Use \n for line breaks.",
-  "polls": [
-    {
-      "question": "Challenging conceptual question text?",
-      "options": [
-        "Option A",
-        "Option B",
-        "Option C",
-        "Option D"
-      ],
-      "correct_option_index": 2,
-      "explanation": "Brief explanation of why the correct option is right and the others are wrong."
-    }
-  ]
-}
+OUTPUT FORMAT:
+You MUST return a valid JSON object matching the provided schema.
    """
 
 # --- Logging Setup ---
+class ContextFormatter(logging.Formatter):
+    def format(self, record):
+        if hasattr(record, "page_id"):
+            record.msg = f"[{record.page_id} | {record.topic}] {record.msg}"
+        return super().format(record)
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(ContextFormatter("%(asctime)s - %(levelname)s - %(message)s"))
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
+    handlers=[handler]
 )
 logger = logging.getLogger(__name__)
 
@@ -106,8 +109,14 @@ class NotionClient:
             "Content-Type": "application/json"
         }
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+        reraise=True
+    )
     def fetch_unprocessed_pages(self, data_source_id: str) -> List[Dict[str, Any]]:
-        url = f"{NOTION_BASE_URL}/data_sources/{data_source_id}/query"
+        url = f"{NOTION_BASE_URL}/databases/{data_source_id}/query"
         payload = {
             "filter": {
                 "property": PROP_SOURCE_PROCESSED,
@@ -119,9 +128,15 @@ class NotionClient:
             response.raise_for_status()
             return response.json().get("results", [])
         except Exception as e:
-            logger.error(f"Failed to query source data source: {e}")
-            raise StudyGuideBotError("Source Data Source query failed") from e
+            logger.error(f"Failed to query source database: {e}")
+            raise
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+        reraise=True
+    )
     def get_page_text_content(self, page_id: str) -> str:
         url = f"{NOTION_BASE_URL}/blocks/{page_id}/children"
         text_parts = []
@@ -164,10 +179,16 @@ class NotionClient:
             return "Untitled"
         return "".join(t.get("plain_text", "") for t in title_list)
 
-    def create_target_page(self, data_source_id: str, title: str, blocks: List[Dict[str, Any]]) -> Optional[str]:
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+        reraise=True
+    )
+    def create_target_page(self, database_id: str, title: str, blocks: List[Dict[str, Any]]) -> Optional[str]:
         url = f"{NOTION_BASE_URL}/pages"
         payload = {
-            "parent": {"data_source_id": data_source_id},
+            "parent": {"database_id": database_id},
             "properties": {
                 "Name": {
                     "title": [{"text": {"content": title}}]
@@ -185,6 +206,12 @@ class NotionClient:
             logger.error(f"Failed to create target page: {e}")
             return None
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+        reraise=True
+    )
     def mark_as_processed(self, page_id: str):
         url = f"{NOTION_BASE_URL}/pages/{page_id}"
         payload = {"properties": {PROP_SOURCE_PROCESSED: {"checkbox": True}}}
@@ -211,6 +238,12 @@ class TelegramClient:
         text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
         return text
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+        reraise=True
+    )
     def send_message(self, text: str):
         if not self.bot_token or not self.chat_id:
             return
@@ -225,15 +258,25 @@ class TelegramClient:
             "parse_mode": "HTML"
         }
         
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            if response.status_code != 200:
-                logger.error(f"Telegram Message Error: {response.text}")
-            response.raise_for_status()
-            logger.info("Telegram message sent.")
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 429:
+            retry_after = int(response.json().get("parameters", {}).get("retry_after", 5))
+            logger.warning(f"Telegram Rate Limit. Retrying after {retry_after}s")
+            import time
+            time.sleep(retry_after)
+            raise requests.exceptions.RequestException("Rate limited")
+            
+        if response.status_code != 200:
+            logger.error(f"Telegram Message Error: {response.text}")
+        response.raise_for_status()
+        logger.info("Telegram message sent.")
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+        reraise=True
+    )
     def send_poll(self, poll_data: Dict[str, Any]):
         if not self.bot_token or not self.chat_id:
             return
@@ -264,14 +307,18 @@ class TelegramClient:
             "explanation": explanation
         }
         
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            if response.status_code != 200:
-                logger.error(f"Telegram Poll Error: {response.text}")
-            response.raise_for_status()
-            logger.info("Telegram poll sent.")
-        except Exception as e:
-            logger.error(f"Failed to send Telegram poll: {e}")
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 429:
+            retry_after = int(response.json().get("parameters", {}).get("retry_after", 5))
+            logger.warning(f"Telegram Rate Limit. Retrying after {retry_after}s")
+            import time
+            time.sleep(retry_after)
+            raise requests.exceptions.RequestException("Rate limited")
+
+        if response.status_code != 200:
+            logger.error(f"Telegram Poll Error: {response.text}")
+        response.raise_for_status()
+        logger.info("Telegram poll sent.")
 
 def markdown_to_notion_blocks(md_text: str) -> List[Dict[str, Any]]:
     blocks = []
@@ -306,20 +353,24 @@ class GeminiClient:
         retry=retry_if_exception_type(Exception),
         reraise=True
     )
-    def generate_study_guide(self, text: str) -> Dict[str, Any]:
-        if not text.strip(): return {"summary": "No content provided.", "polls": []}
+    def generate_study_guide(self, text: str) -> StudyGuideModel:
+        if not text.strip(): 
+            return StudyGuideModel(summary="No content provided.", polls=[])
+            
         try:
             logger.info(f"Requesting study guide from Gemini ({self.model_name})...")
-            full_prompt = f"{GEMINI_SYSTEM_INSTRUCTION}\n\nNotes to process:\n\n{text}"
+            # Using Delimiters for Security (Pillar 4 preview)
+            full_prompt = f"{GEMINI_SYSTEM_INSTRUCTION}\n\nNotes to process:\n[[[CONTENT]]]\n{text}\n[[[/CONTENT]]]"
             
             response = self.client.models.generate_content(
-                model=self.model_name, 
+                model=self.model_name,
                 contents=full_prompt,
                 config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
+                    response_mime_type="application/json",
+                    response_schema=StudyGuideModel,
                 )
             )
-            return json.loads(response.text)
+            return response.parsed
         except Exception as e:
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                 logger.warning(f"Rate limit hit. Retrying...")
@@ -346,13 +397,16 @@ def main():
 
         source_id = page_to_process.get("id")
         source_title = notion.extract_title(page_to_process)
-        logger.info(f"Processing: {source_title}")
+        
+        # Structured Logging Context
+        ctx_logger = logging.LoggerAdapter(logger, {"page_id": source_id, "topic": source_title})
+        ctx_logger.info(f"Processing study guide")
 
         content = notion.get_page_text_content(source_id)
         ai_data = gemini.generate_study_guide(content)
         
-        summary = ai_data.get("summary", "")
-        polls = ai_data.get("polls", [])
+        summary = ai_data.summary
+        polls = ai_data.polls
 
         # Write to Notion
         blocks = markdown_to_notion_blocks(summary)
@@ -362,13 +416,14 @@ def main():
         # Push to Telegram
         telegram.send_message(f"📚 *Topic: {source_title}*\n\n{summary}")
         
-        for poll in polls:
-            telegram.send_poll(poll)
+        for i, poll in enumerate(polls):
+            ctx_logger.info(f"Sending poll {i+1}/{len(polls)}")
+            telegram.send_poll(poll.model_dump())
 
         # Mark as done
         notion.mark_as_processed(source_id)
 
-        logger.info("Daily study guide and polls processing complete.")
+        ctx_logger.info("Daily study guide and polls processing complete.")
             
     except Exception as e:
         logger.exception(f"Unhandled Error: {e}")
