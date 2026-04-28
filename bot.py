@@ -185,19 +185,23 @@ class NotionClient:
         retry=retry_if_exception_type(requests.exceptions.RequestException),
         reraise=True
     )
-    def create_target_page(self, data_source_id: str, title: str, blocks: List[Dict[str, Any]]) -> Optional[str]:
-        url = f"{NOTION_BASE_URL}/pages"
+    def create_target_page(self, data_source_id: str, title: str, blocks: List[Dict[str, Any]], url: Optional[str] = None) -> Optional[str]:
+        url_endpoint = f"{NOTION_BASE_URL}/pages"
+        properties = {
+            "Name": {
+                "title": [{"text": {"content": title}}]
+            }
+        }
+        if url:
+            properties["Telegram Link"] = {"url": url}
+            
         payload = {
             "parent": {"data_source_id": data_source_id},
-            "properties": {
-                "Name": {
-                    "title": [{"text": {"content": title}}]
-                }
-            },
+            "properties": properties,
             "children": blocks[:100]
         }
         try:
-            response = requests.post(url, headers=self.headers, json=payload, timeout=20)
+            response = requests.post(url_endpoint, headers=self.headers, json=payload, timeout=20)
             response.raise_for_status()
             data = response.json()
             logger.info(f"Successfully created target page: {title}")
@@ -205,6 +209,25 @@ class NotionClient:
         except Exception as e:
             logger.error(f"Failed to create target page: {e}")
             return None
+
+    def fetch_all_target_pages(self, data_source_id: str) -> List[Dict[str, Any]]:
+        url = f"{NOTION_BASE_URL}/databases/{data_source_id}/query"
+        pages = []
+        has_more = True
+        start_cursor = None
+        
+        while has_more:
+            payload = {}
+            if start_cursor:
+                payload["start_cursor"] = start_cursor
+            
+            response = requests.post(url, headers=self.headers, json=payload, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            pages.extend(data.get("results", []))
+            has_more = data.get("has_more", False)
+            start_cursor = data.get("next_cursor")
+        return pages
 
     @retry(
         stop=stop_after_attempt(3),
@@ -228,6 +251,12 @@ class TelegramClient:
         self.chat_id = chat_id
         self.base_url = f"{TELEGRAM_BASE_URL}/bot{self.bot_token}"
 
+    def get_message_link(self, message_id: int) -> str:
+        # For channels: https://t.me/c/123456789/1
+        # Strip -100 prefix if present
+        clean_id = str(self.chat_id).replace("-100", "")
+        return f"https://t.me/c/{clean_id}/{message_id}"
+
     def _sanitize_html(self, text: str) -> str:
         """Basic conversion of Markdown-style bold/italic to HTML for Telegram."""
         # Escape HTML special characters
@@ -244,9 +273,9 @@ class TelegramClient:
         retry=retry_if_exception_type(requests.exceptions.RequestException),
         reraise=True
     )
-    def send_message(self, text: str):
+    def send_message(self, text: str) -> Optional[int]:
         if not self.bot_token or not self.chat_id:
-            return
+            return None
             
         url = f"{self.base_url}/sendMessage"
         # Sanitize and convert to HTML
@@ -255,7 +284,8 @@ class TelegramClient:
         payload = {
             "chat_id": self.chat_id,
             "text": html_text,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
         }
         
         response = requests.post(url, json=payload, timeout=10)
@@ -266,10 +296,38 @@ class TelegramClient:
             time.sleep(retry_after)
             raise requests.exceptions.RequestException("Rate limited")
             
-        if response.status_code != 200:
-            logger.error(f"Telegram Message Error: {response.text}")
         response.raise_for_status()
         logger.info("Telegram message sent.")
+        return response.json().get("result", {}).get("message_id")
+
+    def get_pinned_message_id(self) -> Optional[int]:
+        url = f"{self.base_url}/getChat"
+        payload = {"chat_id": self.chat_id}
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            pinned = response.json().get("result", {}).get("pinned_message")
+            return pinned.get("message_id") if pinned else None
+        except Exception as e:
+            logger.error(f"Failed to get pinned message: {e}")
+            return None
+
+    def edit_message(self, message_id: int, text: str):
+        url = f"{self.base_url}/editMessageText"
+        html_text = self._sanitize_html(text)
+        payload = {
+            "chat_id": self.chat_id,
+            "message_id": message_id,
+            "text": html_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        requests.post(url, json=payload, timeout=10).raise_for_status()
+
+    def pin_message(self, message_id: int):
+        url = f"{self.base_url}/pinChatMessage"
+        payload = {"chat_id": self.chat_id, "message_id": message_id, "disable_notification": True}
+        requests.post(url, json=payload, timeout=10).raise_for_status()
 
     @retry(
         stop=stop_after_attempt(5),
@@ -408,17 +466,58 @@ def main():
         summary = ai_data.summary
         polls = ai_data.polls
 
-        # Write to Notion
-        blocks = markdown_to_notion_blocks(summary)
-        target_title = f"Study Guide: {source_title}"
-        notion.create_target_page(config.target_id, target_title, blocks)
-
         # Push to Telegram
-        telegram.send_message(f"📚 *Topic: {source_title}*\n\n{summary}")
+        summary_text = f"📚 *Topic: {source_title}*\n\n{summary}"
+        msg_id = telegram.send_message(summary_text)
+        
+        # Store Link in Notion
+        if msg_id:
+            msg_link = telegram.get_message_link(msg_id)
+            # Create the page with the link
+            blocks = markdown_to_notion_blocks(summary)
+            target_title = f"Study Guide: {source_title}"
+            notion.create_target_page(config.target_id, target_title, blocks, url=msg_link)
+        else:
+            blocks = markdown_to_notion_blocks(summary)
+            target_title = f"Study Guide: {source_title}"
+            notion.create_target_page(config.target_id, target_title, blocks)
         
         for i, poll in enumerate(polls):
             ctx_logger.info(f"Sending poll {i+1}/{len(polls)}")
             telegram.send_poll(poll.model_dump())
+
+        # Update Pinned Index
+        try:
+            ctx_logger.info("Updating pinned index...")
+            all_pages = notion.fetch_all_target_pages(config.target_id)
+            index_entries = []
+            for p in all_pages:
+                p_title = notion.extract_title(p)
+                p_url = p.get("properties", {}).get("Telegram Link", {}).get("url")
+                if p_url:
+                    index_entries.append(f"• <a href=\"{p_url}\">{p_title.replace('Study Guide: ', '')}</a>")
+            
+            if index_entries:
+                index_text = "<b>📚 Master Study Index</b>\n\n" + "\n".join(index_entries)
+                pinned_id = telegram.get_pinned_message_id()
+                
+                if pinned_id:
+                    try:
+                        telegram.edit_message(pinned_id, index_text)
+                        ctx_logger.info("Updated existing pinned index.")
+                    except Exception:
+                        # If edit fails (maybe not an index), send new
+                        new_pinned = telegram.send_message(index_text)
+                        if new_pinned:
+                            telegram.pin_message(new_pinned)
+                            ctx_logger.info("Sent and pinned new index.")
+                else:
+                    new_pinned = telegram.send_message(index_text)
+                    if new_pinned:
+                        telegram.pin_message(new_pinned)
+                        ctx_logger.info("Sent and pinned new index.")
+        except Exception as e:
+            ctx_logger.error(f"Failed to update index: {e}")
 
         # Mark as done
         notion.mark_as_processed(source_id)
