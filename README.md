@@ -106,9 +106,11 @@ If you change the prompt, keep this structure or update the `main()` consumers a
 | **Private chat** | Message your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` and find `"chat": {"id": ...}` | Positive integer, e.g. `123456789` |
 | **Group** | Add bot to group, send a message, check `getUpdates` | Negative integer, e.g. `-987654321` |
 | **Supergroup** (groups with topics enabled, or upgraded groups) | Same as group | `-100` prefix, e.g. `-100987654321` |
-| **Channel** | Open [web.telegram.org](https://web.telegram.org), click your channel, read the URL: `.../#-100123456789` | `-100` prefix, e.g. `-100123456789` |
+| **Channel** | Open [web.telegram.org](https://web.telegram.org), click your channel, read the URL: `.../#-100123456789` | **MANDATORY `-100` prefix**, e.g. `-1003562627005` |
 
-> **Channel requirement:** The bot must be an **Administrator** of the channel to post.
+> **Channel Requirements:** 
+> 1. The bot must be an **Administrator** of the channel to post.
+> 2. Polls sent to channels are **always anonymous** (this is enforced in the code).
 
 ### 4. GitHub Actions Secrets
 

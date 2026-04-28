@@ -301,7 +301,7 @@ class TelegramClient:
             "chat_id": self.chat_id,
             "question": question,
             "options": options,
-            "is_anonymous": False,
+            "is_anonymous": True,
             "type": "quiz",
             "correct_option_id": correct_index,
             "explanation": explanation
