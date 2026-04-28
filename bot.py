@@ -211,7 +211,7 @@ class NotionClient:
             return None
 
     def fetch_all_target_pages(self, data_source_id: str) -> List[Dict[str, Any]]:
-        url = f"{NOTION_BASE_URL}/databases/{data_source_id}/query"
+        url = f"{NOTION_BASE_URL}/data_sources/{data_source_id}/query"
         pages = []
         has_more = True
         start_cursor = None
